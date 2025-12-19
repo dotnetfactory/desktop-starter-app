@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.DS_Store
+.vscode/
+coverage/
+npm-debug.log*
+yarn-error.log*
+.idea/
+*.log
+*.swp
+*.swo
+.vite/
+out/
+certs/Certificates.p12
+certs/CertificateSigningRequest.certSigningRequest
+certs/developerID_application.cer
