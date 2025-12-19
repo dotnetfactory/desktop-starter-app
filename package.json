@@ -1,7 +1,7 @@
 {
   "name": "desktop-starter-app",
   "productName": "Desktop Starter App",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Production-ready Electron + React + TypeScript desktop app template with auto-updates, SQLite database, and cross-platform builds",
   "main": ".vite/build/main.js",
   "scripts": {
