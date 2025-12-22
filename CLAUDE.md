@@ -69,6 +69,8 @@ Uses SQLite with better-sqlite3. WAL mode enabled for concurrent access.
 
 Schema defined in `src/database/schema.ts`.
 
+IMPORTANT: When making changes to existing tables, make sure to create migrations in separate files.
+
 ### IPC Pattern
 
 All IPC handlers return `IPCResponse<T>`:
@@ -154,3 +156,4 @@ The config is injected at build time via Vite's `define` and available as `__APP
 - `src/database/schema.ts` - Database table definitions
 - `src/renderer/App.tsx` - Main React component
 - `forge.config.ts` - Build and packaging configuration
+
