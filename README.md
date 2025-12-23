@@ -287,6 +287,16 @@ The app automatically checks for updates on startup when running in production. 
 
 For detailed setup instructions, see [docs/updater.md](docs/updater.md).
 
+## Apps Built with This Template
+
+| App | Description |
+|-----|-------------|
+| [StoryFlow](https://www.usestoryflow.com) | AI-powered book writing app |
+| [Model Faceoff](https://www.modelfaceoff.com) | Compare AI models side-by-side |
+| [MarkdownFlows](https://github.com/dotnetfactory/markdownflows) | Markdown editor with workflows |
+
+*Built something with this template? Open a PR to add it here!*
+
 ## Sponsored By
 
 <a href="https://elitecoders.co">
