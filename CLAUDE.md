@@ -137,7 +137,6 @@ The config is injected at build time via Vite's `define` and available as `__APP
 ### Environment Variables (Secrets Only)
 
 `.env` is for secrets only (gitignored):
-- `GH_TOKEN` - GitHub PAT for private repo access
 - `APPLE_*` - macOS signing credentials
 
 ### Build Configuration

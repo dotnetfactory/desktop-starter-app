@@ -118,7 +118,6 @@ cp .env.example .env
 
 | Variable    | Description                          | When Needed       |
 | ----------- | ------------------------------------ | ----------------- |
-| `GH_TOKEN`  | GitHub PAT for private repo access   | Private repos     |
 | `APPLE_*`   | macOS signing credentials            | macOS releases    |
 
 ### 4. GitHub Secrets (for releases)
@@ -127,14 +126,13 @@ Add these secrets to your GitHub repository for automated releases:
 
 | Secret                     | Description                     | Required |
 | -------------------------- | ------------------------------- | -------- |
-| `GH_TOKEN`                 | Personal Access Token (private) | Yes\*    |
 | `APPLE_ID`                 | Apple Developer email           | macOS    |
 | `APPLE_PASSWORD`           | App-specific password           | macOS    |
 | `APPLE_TEAM_ID`            | Apple Team ID                   | macOS    |
 | `APPLE_CERTIFICATE`        | Base64-encoded .p12 certificate | macOS    |
 | `APPLE_CERTIFICATE_PASSWORD` | Certificate password            | macOS    |
 
-\*Required only for private repositories
+No GitHub token is needed: releases are published with the workflow's own `GITHUB_TOKEN`, and installed apps read them anonymously from the public repo. If the source repo is private, publish to a public `<app>-releases` repo with a scoped `RELEASES_TOKEN` instead (see `docs/updater.md`); never embed a token in the app.
 
 ## Development
 

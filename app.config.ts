@@ -45,7 +45,12 @@ export const config = {
     /** Repository name */
     repo: 'desktop-starter-app',
 
-    /** Set to true if repository is private (requires GH_TOKEN secret) */
+    /**
+     * Keep false. electron-updater reads releases anonymously from a public repo; a private repo
+     * would need a token inside the app, which the build never embeds (see forge.config.ts). If
+     * the source repo is private, publish to a public `<app>-releases` repo instead, as
+     * storyflow-app and nitrosocial-app do with a RELEASES_TOKEN secret scoped to that repo.
+     */
     private: false,
   },
 

@@ -11,7 +11,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        # windows-2022, not windows-latest: the VS2025 image on windows-latest is not recognised
+        # by the node-gyp bundled with @electron/rebuild, so better-sqlite3 fails to rebuild.
+        os: [macos-latest, windows-2022, ubuntu-latest]
 
     runs-on: ${{ matrix.os }}
 
@@ -28,11 +30,34 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Before `make`: packaging rebuilds better-sqlite3 for Electron, which breaks Node tests.
+      - name: Run tests
+        run: npx vitest run
+
       - name: Build app
         run: npm run make
         env:
           # Skip code signing for CI builds
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      # The packaged app-update.yml is what installed apps use to find updates. It must name the
+      # public releases repo and must never contain a token (a PAT embedded here leaked in 2026).
+      - name: Assert the packaged app-update.yml names the public repo and has no token
+        shell: bash
+        run: |
+          set -euo pipefail
+          files=$(find out -name app-update.yml -not -path '*/node_modules/*' -not -path '*/make/*')
+          test -n "$files" || { echo "FAIL: no packaged app-update.yml found under out/"; exit 1; }
+          for f in $files; do
+            echo "== $f"
+            if grep -qi 'token' "$f"; then echo "FAIL: $f contains a token line"; exit 1; fi
+            cat "$f"
+            grep -qx 'provider: github' "$f" || { echo "FAIL: provider is not github"; exit 1; }
+            grep -qx 'owner: dotnetfactory' "$f" || { echo "FAIL: owner is not dotnetfactory"; exit 1; }
+            grep -qx 'repo: desktop-starter-app' "$f" || { echo "FAIL: repo is not desktop-starter-app"; exit 1; }
+            grep -qx 'private: false' "$f" || { echo "FAIL: private is not false"; exit 1; }
+            test "$(grep -c . "$f")" -eq 4 || { echo "FAIL: expected exactly 4 lines"; exit 1; }
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

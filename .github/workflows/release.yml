@@ -1,12 +1,104 @@
 name: Release
 
+# Tag a version (e.g. v1.0.11) to build every platform and publish the installers to this repo's
+# releases. Installed apps read them anonymously (the repo is public), so no credential is ever
+# embedded in the app (see forge.config.ts).
+#
+# Secrets: only the workflow's own GITHUB_TOKEN for publishing, plus APPLE_* for macOS signing
+# and notarization. Nothing here reads a GH_TOKEN secret.
+
 on:
   push:
     tags:
       - 'v*'
 
+# One run per tag at a time: a tag deleted and re-pushed while a run is in flight would otherwise
+# race that run's finalize and could publish into its release. The second run queues, then its
+# prepare sees the published release and stops.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+# Creating, uploading to and publishing the release in this repo needs contents: write.
+permissions:
+  contents: write
+
+env:
+  # This public repo publishes to itself.
+  RELEASES_REPO: ${{ github.repository }}
+
 jobs:
+  # Pre-create the draft release in the releases repo so the matrix jobs append to it.
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # No step needs git auth after checkout; keep the token out of .git/config before npm ci.
+          persist-credentials: false
+
+      # The Forge publisher picks its release from package.json ("v" + version), not from the
+      # pushed tag, and with force: true it replaces same-named assets on whatever release that
+      # is. The gh steps below use the tag. Refuse to run unless the two agree, so a mis-tagged
+      # commit can never make the matrix jobs rewrite an already-published release.
+      - name: Check the tag matches package.json
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match package.json version $VERSION; the publisher would target v$VERSION"
+            exit 1
+          fi
+
+      - name: Ensure draft release exists
+        env:
+          # gh CLI auth only. This GH_TOKEN never reaches npm or forge.config.ts: the packaging
+          # hook does not read it, and scripts/release-manifests.test.ts asserts that no token
+          # is ever written into app-update.yml.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Only a published release has a tag, so this endpoint answers 200 only for a live release
+          # (drafts are 404). gh release view alone races a draft lookup against a published lookup.
+          if gh api "repos/$RELEASES_REPO/releases/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::$TAG is already published in $RELEASES_REPO; bump the version instead of re-using a tag"
+            exit 1
+          fi
+          set +e
+          STATE=$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft 2>view-error.txt)
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then
+            if [ "$STATE" != "true" ]; then
+              echo "::error::$TAG is already published in $RELEASES_REPO; refusing to modify a live release. Delete it or tag a new version."
+              exit 1
+            fi
+            echo "Draft $TAG already exists; the matrix jobs will append to it."
+            exit 0
+          elif ! grep -qi 'release not found' view-error.txt; then
+            # Anything but a clean "not found" (auth, rate limit, outage) must not fall through to
+            # `gh release create`, which would happily add a second draft for the same tag.
+            cat view-error.txt
+            echo "::error::could not look up $TAG in $RELEASES_REPO"
+            exit 1
+          fi
+          # The Forge publisher finds the draft by scanning the first 100 releases; fail now rather
+          # than let four matrix jobs each create their own draft once the repo outgrows that.
+          COUNT="$(gh api "repos/$RELEASES_REPO/releases?per_page=100" --jq length)" || COUNT=""
+          case "$COUNT" in
+            ""|*[!0-9]*) echo "::error::could not count the releases in $RELEASES_REPO"; exit 1;;
+          esac
+          if [ "$COUNT" -ge 100 ]; then
+            echo "::error::$RELEASES_REPO has 100+ releases; @electron-forge/publisher-github only searches the first 100. Prune old releases first."
+            exit 1
+          fi
+          # The tag already points at this repo's commit, so "latest release" ordering (by the tagged
+          # commit's date) advances with every version on its own.
+          gh release create "$TAG" --repo "$RELEASES_REPO" --draft --title "$TAG" --generate-notes
+
   release:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +109,11 @@ jobs:
           - os: macos-15-intel
             platform: darwin
             arch: x64
-          - os: windows-latest
+          # Pinned, not windows-latest. windows-latest now resolves to the VS2025
+          # image, and the node-gyp bundled with @electron/rebuild cannot find it
+          # ("Could not find any Visual Studio installation to use"), so the
+          # better-sqlite3 native rebuild fails and no Windows artifact is produced.
+          - os: windows-2022
             platform: win32
             arch: x64
           - os: ubuntu-latest
@@ -26,12 +122,12 @@ jobs:
 
     runs-on: ${{ matrix.os }}
 
-    permissions:
-      contents: write
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # No step needs git auth after checkout; keep the token out of .git/config before npm ci.
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -41,6 +137,32 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # Guards this leg on its own: a re-run of one matrix job after finalize has published
+      # would otherwise force-replace live assets (prepare does not re-run). The release must
+      # still be a draft and the tag must still match package.json. gh CLI auth only.
+      - name: Refuse to publish into a live release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+          IS_DRAFT="$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::$TAG in $RELEASES_REPO is not a draft; refusing to publish into a live release"
+            exit 1
+          fi
+          # Only a published release has a tag, so this endpoint answers 200 only for a live release
+          # (drafts are 404). gh release view alone races a draft lookup against a published lookup.
+          if gh api "repos/$RELEASES_REPO/releases/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::$TAG is already published in $RELEASES_REPO; bump the version instead of re-using a tag"
+            exit 1
+          fi
 
       # macOS: Import signing certificate
       - name: Import macOS signing certificate
@@ -57,13 +179,100 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
           rm certificate.p12
 
+      # Uploads this platform's installers and latest-*.yml into the draft release
+      # (forge.config.ts publisher, authToken: GITHUB_TOKEN).
       - name: Publish to GitHub
         run: npm run publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Token for auto-updater to check private repo releases
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           # macOS code signing and notarization
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  # Verify every manifest against the uploaded assets BEFORE anything is changed on the draft, then
+  # upload the merged macOS manifest and publish. Any failure leaves the draft unpublished and
+  # fails the job. The token is scoped to the gh steps; npm never sees it.
+  finalize:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # No step needs git auth after checkout; keep the token out of .git/config before npm ci.
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        # Only scripts/*.ts run here: no install scripts, no native builds, no Electron download.
+        run: npm ci --ignore-scripts
+
+      - name: Download the draft's manifests and merge the macOS pair
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh CLI auth only, see prepare
+        run: |
+          rm -rf gate && mkdir -p gate/manifests gate/per-arch gate/assets
+          # Only a published release has a tag, so this endpoint answers 200 only for a live release
+          # (drafts are 404). gh release view alone races a draft lookup against a published lookup.
+          if gh api "repos/$RELEASES_REPO/releases/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::$TAG is already published in $RELEASES_REPO; bump the version instead of re-using a tag"
+            exit 1
+          fi
+          gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft,assets > gate/release.json
+          if [ "$(jq -r .isDraft gate/release.json)" != "true" ]; then
+            echo "::error::$TAG in $RELEASES_REPO is already published; refusing to touch a live release."
+            exit 1
+          fi
+          names=$(jq -r '.assets[].name' gate/release.json)
+          if grep -qx 'latest-mac-arm64.yml' <<<"$names" && grep -qx 'latest-mac-x64.yml' <<<"$names"; then
+            gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/per-arch \
+              --pattern 'latest-mac-arm64.yml' --pattern 'latest-mac-x64.yml'
+            npx tsx scripts/merge-mac-manifest.ts --out gate/manifests/latest-mac.yml \
+              gate/per-arch/latest-mac-arm64.yml gate/per-arch/latest-mac-x64.yml
+            echo "MERGED_MAC=1" >> "$GITHUB_ENV"
+          elif grep -qx 'latest-mac.yml' <<<"$names"; then
+            echo "latest-mac.yml is already merged on the draft (earlier run); verifying it as is."
+            gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/manifests --pattern 'latest-mac.yml'
+          else
+            echo "::error::neither latest-mac-arm64.yml + latest-mac-x64.yml nor latest-mac.yml is on the draft."
+            exit 1
+          fi
+          gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/manifests \
+            --pattern 'latest.yml' --pattern 'latest-linux.yml'
+
+      - name: Download every installer the manifests reference
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh CLI auth only
+        run: |
+          set -o pipefail
+          # A missing asset is reported by the verify step below, with everything else that is
+          # wrong, so a failed download must not end this step early.
+          npx tsx scripts/verify-release-manifests.ts --manifests gate/manifests --list-referenced |
+            while read -r asset; do
+              gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/assets --pattern "$asset" ||
+                echo "::warning::could not download $asset; the verify step will report it"
+            done
+
+      - name: Verify the manifests against the tag and the draft's assets
+        run: |
+          npx tsx scripts/verify-release-manifests.ts --tag "$TAG" --manifests gate/manifests \
+            --assets gate/release.json --downloads gate/assets
+
+      - name: Upload the merged macOS manifest and publish the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh CLI auth only
+        run: |
+          if [ "${MERGED_MAC:-0}" = "1" ]; then
+            gh release upload "$TAG" gate/manifests/latest-mac.yml --repo "$RELEASES_REPO" --clobber
+            gh release delete-asset "$TAG" latest-mac-arm64.yml --repo "$RELEASES_REPO" --yes
+            gh release delete-asset "$TAG" latest-mac-x64.yml --repo "$RELEASES_REPO" --yes
+          fi
+          gh release edit "$TAG" --repo "$RELEASES_REPO" --draft=false
