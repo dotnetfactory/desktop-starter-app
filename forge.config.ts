@@ -151,7 +151,8 @@ const config: ForgeConfig = {
       draft: true,
       // Re-running the workflow rebuilds every artifact, so replace same-named assets instead of
       // keeping the stale upload (which would no longer match the fresh manifests). The prepare
-      // job refuses to run against an already-published release, so this only touches drafts.
+      // job refuses to run against an already-published release and every matrix leg re-checks
+      // that the release is still a draft right before publishing, so this only touches drafts.
       force: true,
     }),
   ],

@@ -75,8 +75,10 @@ if (app.isPackaged && __APP_CONFIG__.autoUpdateEnabled) {
    ```
 3. GitHub Actions automatically:
    - `prepare`: checks that the tag equals `v<package.json version>`, then creates the draft release
-   - `release` (matrix): builds macOS arm64 + x64, Windows and Linux, signs macOS when certs are
-     configured, and uploads the installers plus this platform's `latest-*.yml` into the draft
+   - `release` (matrix): each leg re-checks that the tag equals `v<package.json version>` and that
+     the release is still an unpublished draft, then builds macOS arm64 + x64, Windows and Linux,
+     signs macOS when certs are configured, and uploads the installers plus this platform's
+     `latest-*.yml` into the draft
    - `finalize`: merges `latest-mac-arm64.yml` + `latest-mac-x64.yml` into one `latest-mac.yml`,
      verifies every manifest against the tag and the uploaded assets (names, sizes, sha512), and
      only then publishes the draft. A failed check leaves the draft unpublished.
@@ -88,14 +90,15 @@ if (app.isPackaged && __APP_CONFIG__.autoUpdateEnabled) {
 
 - **Trigger**: Push to main, Pull requests
 - **Platforms**: macOS, Windows, Ubuntu
-- **Steps**: Checkout, Node 20 setup, npm ci, vitest, make, assert the packaged `app-update.yml` names the public repo and has no token
+- **Steps**: Checkout, Node 20 setup, npm ci, vitest, make, assert the packaged `app-update.yml` names the configured releases repo with `private: false` and has no token
 - **Purpose**: Validate builds on every change
 
 ### release.yml (Publish)
 
 - **Trigger**: Push tags `v*`
 - **Platforms**: macOS (arm64 + x64), Windows, Linux
-- **Jobs**: prepare (draft) → release matrix (`npm run publish` into the draft) → finalize (merge mac manifests, verify, undraft)
+- **Jobs**: prepare (tag check, draft) → release matrix (draft re-check, `npm run publish` into the draft) → finalize (merge mac manifests, verify, undraft). One run per tag at a time (`concurrency`).
+- **Never reuse a tag**: deleting a published release's tag turns that release into a draft, which a re-push of the same version would rebuild and republish under the same version string. Bump the version instead.
 - **Purpose**: Build and publish releases
 
 ## GitHub Secrets Required
@@ -161,8 +164,9 @@ did, in Oct 2026). So if the source repo is private:
 2. Point `app.config.ts` `github.repo` at it and keep `private: false`
 3. Create a fine-grained PAT with Contents read/write on that repo only, add it as the
    `RELEASES_TOKEN` secret, set `authToken: process.env.RELEASES_TOKEN` on the publisher in
-   `forge.config.ts`, and pass it ONLY to the steps that need it: the `npm run publish` step of
-   the matrix and the gh CLI steps in `prepare` / `finalize`. Never set it at job or workflow
+   `forge.config.ts`, and pass it ONLY to the steps that need it: the `npm run publish` step and
+   the `Refuse to publish into a live release` gh step of the matrix, and the gh CLI steps in
+   `prepare` / `finalize`. Never set it at job or workflow
    level, and never on `npm ci`, whose install scripts would see it. The packaging hook never
    reads it.
 

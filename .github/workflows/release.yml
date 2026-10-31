@@ -12,6 +12,13 @@ on:
     tags:
       - 'v*'
 
+# One run per tag at a time: a tag deleted and re-pushed while a run is in flight would otherwise
+# race that run's finalize and could publish into its release. The second run queues, then its
+# prepare sees the published release and stops.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 # Creating, uploading to and publishing the release in this repo needs contents: write.
 permissions:
   contents: write
@@ -27,6 +34,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # No step needs git auth after checkout; keep the token out of .git/config before npm ci.
+          persist-credentials: false
 
       # The Forge publisher picks its release from package.json ("v" + version), not from the
       # pushed tag, and with force: true it replaces same-named assets on whatever release that
@@ -49,6 +59,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          # Only a published release has a tag, so this endpoint answers 200 only for a live release
+          # (drafts are 404). gh release view alone races a draft lookup against a published lookup.
+          if gh api "repos/$RELEASES_REPO/releases/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::$TAG is already published in $RELEASES_REPO; bump the version instead of re-using a tag"
+            exit 1
+          fi
           set +e
           STATE=$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft 2>view-error.txt)
           STATUS=$?
@@ -69,7 +85,11 @@ jobs:
           fi
           # The Forge publisher finds the draft by scanning the first 100 releases; fail now rather
           # than let four matrix jobs each create their own draft once the repo outgrows that.
-          if [ "$(gh api "repos/$RELEASES_REPO/releases?per_page=100" --jq length)" -ge 100 ]; then
+          COUNT="$(gh api "repos/$RELEASES_REPO/releases?per_page=100" --jq length)" || COUNT=""
+          case "$COUNT" in
+            ""|*[!0-9]*) echo "::error::could not count the releases in $RELEASES_REPO"; exit 1;;
+          esac
+          if [ "$COUNT" -ge 100 ]; then
             echo "::error::$RELEASES_REPO has 100+ releases; @electron-forge/publisher-github only searches the first 100. Prune old releases first."
             exit 1
           fi
@@ -105,6 +125,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # No step needs git auth after checkout; keep the token out of .git/config before npm ci.
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -132,6 +155,12 @@ jobs:
           IS_DRAFT="$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft)"
           if [ "$IS_DRAFT" != "true" ]; then
             echo "::error::$TAG in $RELEASES_REPO is not a draft; refusing to publish into a live release"
+            exit 1
+          fi
+          # Only a published release has a tag, so this endpoint answers 200 only for a live release
+          # (drafts are 404). gh release view alone races a draft lookup against a published lookup.
+          if gh api "repos/$RELEASES_REPO/releases/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::$TAG is already published in $RELEASES_REPO; bump the version instead of re-using a tag"
             exit 1
           fi
 
@@ -172,6 +201,9 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # No step needs git auth after checkout; keep the token out of .git/config before npm ci.
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -188,6 +220,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh CLI auth only, see prepare
         run: |
           rm -rf gate && mkdir -p gate/manifests gate/per-arch gate/assets
+          # Only a published release has a tag, so this endpoint answers 200 only for a live release
+          # (drafts are 404). gh release view alone races a draft lookup against a published lookup.
+          if gh api "repos/$RELEASES_REPO/releases/tags/$TAG" --silent 2>/dev/null; then
+            echo "::error::$TAG is already published in $RELEASES_REPO; bump the version instead of re-using a tag"
+            exit 1
+          fi
           gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft,assets > gate/release.json
           if [ "$(jq -r .isDraft gate/release.json)" != "true" ]; then
             echo "::error::$TAG in $RELEASES_REPO is already published; refusing to touch a live release."
