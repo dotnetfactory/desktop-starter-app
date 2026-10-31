@@ -25,6 +25,22 @@ jobs:
   prepare:
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The Forge publisher picks its release from package.json ("v" + version), not from the
+      # pushed tag, and with force: true it replaces same-named assets on whatever release that
+      # is. The gh steps below use the tag. Refuse to run unless the two agree, so a mis-tagged
+      # commit can never make the matrix jobs rewrite an already-published release.
+      - name: Check the tag matches package.json
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match package.json version $VERSION; the publisher would target v$VERSION"
+            exit 1
+          fi
+
       - name: Ensure draft release exists
         env:
           # gh CLI auth only. This GH_TOKEN never reaches npm or forge.config.ts: the packaging
@@ -33,13 +49,29 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF_NAME}"
-          if STATE=$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft 2>/dev/null); then
+          set +e
+          STATE=$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft 2>view-error.txt)
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ]; then
             if [ "$STATE" != "true" ]; then
               echo "::error::$TAG is already published in $RELEASES_REPO; refusing to modify a live release. Delete it or tag a new version."
               exit 1
             fi
             echo "Draft $TAG already exists; the matrix jobs will append to it."
             exit 0
+          elif ! grep -qi 'release not found' view-error.txt; then
+            # Anything but a clean "not found" (auth, rate limit, outage) must not fall through to
+            # `gh release create`, which would happily add a second draft for the same tag.
+            cat view-error.txt
+            echo "::error::could not look up $TAG in $RELEASES_REPO"
+            exit 1
+          fi
+          # The Forge publisher finds the draft by scanning the first 100 releases; fail now rather
+          # than let four matrix jobs each create their own draft once the repo outgrows that.
+          if [ "$(gh api "repos/$RELEASES_REPO/releases?per_page=100" --jq length)" -ge 100 ]; then
+            echo "::error::$RELEASES_REPO has 100+ releases; @electron-forge/publisher-github only searches the first 100. Prune old releases first."
+            exit 1
           fi
           # The tag already points at this repo's commit, so "latest release" ordering (by the tagged
           # commit's date) advances with every version on its own.
@@ -82,6 +114,26 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # Guards this leg on its own: a re-run of one matrix job after finalize has published
+      # would otherwise force-replace live assets (prepare does not re-run). The release must
+      # still be a draft and the tag must still match package.json. gh CLI auth only.
+      - name: Refuse to publish into a live release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "v$VERSION" ]; then
+            echo "::error::tag $TAG does not match package.json version $VERSION"
+            exit 1
+          fi
+          IS_DRAFT="$(gh release view "$TAG" --repo "$RELEASES_REPO" --json isDraft --jq .isDraft)"
+          if [ "$IS_DRAFT" != "true" ]; then
+            echo "::error::$TAG in $RELEASES_REPO is not a draft; refusing to publish into a live release"
+            exit 1
+          fi
 
       # macOS: Import signing certificate
       - name: Import macOS signing certificate
@@ -162,9 +214,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # gh CLI auth only
         run: |
-          npx tsx scripts/verify-release-manifests.ts --tag "$TAG" --manifests gate/manifests --list-referenced |
+          set -o pipefail
+          # A missing asset is reported by the verify step below, with everything else that is
+          # wrong, so a failed download must not end this step early.
+          npx tsx scripts/verify-release-manifests.ts --manifests gate/manifests --list-referenced |
             while read -r asset; do
-              gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/assets --pattern "$asset"
+              gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/assets --pattern "$asset" ||
+                echo "::warning::could not download $asset; the verify step will report it"
             done
 
       - name: Verify the manifests against the tag and the draft's assets

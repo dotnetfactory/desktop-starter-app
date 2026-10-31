@@ -3,7 +3,7 @@
  * three manifests on the draft release agree with the tag and with the assets actually uploaded.
  *
  *   # names of every installer the manifests point at (to download them for hashing)
- *   npm run manifests:verify -- --tag v1.0.14 --manifests DIR --list-referenced
+ *   npm run manifests:verify -- --manifests DIR --list-referenced
  *
  *   # the gate itself; exits 1 and lists every problem if the draft must stay unpublished
  *   npm run manifests:verify -- --tag v1.0.14 --manifests DIR --assets assets.json [--downloads DIR]
@@ -24,7 +24,7 @@ import {
 
 function usage(): never {
   console.error(
-    'Usage: verify-release-manifests --tag <vX.Y.Z> --manifests <dir> (--list-referenced | --assets <assets.json> [--downloads <dir>])'
+    'Usage: verify-release-manifests --manifests <dir> (--list-referenced | --tag <vX.Y.Z> --assets <assets.json> [--downloads <dir>])'
   );
   process.exit(2);
 }
@@ -46,9 +46,8 @@ function readManifests(dir: string): Partial<Record<ReleaseManifestName, string>
 }
 
 async function main(argv: string[]): Promise<void> {
-  const tag = option(argv, '--tag');
   const manifestsDir = option(argv, '--manifests');
-  if (!tag || !manifestsDir) {
+  if (!manifestsDir) {
     usage();
   }
   const manifests = readManifests(manifestsDir);
@@ -60,8 +59,9 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  const tag = option(argv, '--tag');
   const assetsPath = option(argv, '--assets');
-  if (!assetsPath) {
+  if (!tag || !assetsPath) {
     usage();
   }
   const parsed = JSON.parse(fs.readFileSync(assetsPath, 'utf8')) as { assets?: ReleaseAssetLike[] } | ReleaseAssetLike[];

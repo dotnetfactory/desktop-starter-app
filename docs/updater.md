@@ -74,7 +74,7 @@ if (app.isPackaged && __APP_CONFIG__.autoUpdateEnabled) {
    npm run version:major   # 1.0.0 -> 2.0.0
    ```
 3. GitHub Actions automatically:
-   - `prepare`: creates the draft release
+   - `prepare`: checks that the tag equals `v<package.json version>`, then creates the draft release
    - `release` (matrix): builds macOS arm64 + x64, Windows and Linux, signs macOS when certs are
      configured, and uploads the installers plus this platform's `latest-*.yml` into the draft
    - `finalize`: merges `latest-mac-arm64.yml` + `latest-mac-x64.yml` into one `latest-mac.yml`,
@@ -161,8 +161,10 @@ did, in Oct 2026). So if the source repo is private:
 2. Point `app.config.ts` `github.repo` at it and keep `private: false`
 3. Create a fine-grained PAT with Contents read/write on that repo only, add it as the
    `RELEASES_TOKEN` secret, set `authToken: process.env.RELEASES_TOKEN` on the publisher in
-   `forge.config.ts`, and pass it to every job of the release workflow (`npm run publish` in the
-   matrix, the gh CLI in `prepare` / `finalize`). The packaging hook never reads it.
+   `forge.config.ts`, and pass it ONLY to the steps that need it: the `npm run publish` step of
+   the matrix and the gh CLI steps in `prepare` / `finalize`. Never set it at job or workflow
+   level, and never on `npm ci`, whose install scripts would see it. The packaging hook never
+   reads it.
 
 storyflow-app and nitrosocial-app are the reference implementations.
 

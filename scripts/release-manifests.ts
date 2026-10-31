@@ -201,7 +201,13 @@ export function isUpdateArtifact(platform: string, artifactPath: string): boolea
   return extension !== undefined && artifactPath.toLowerCase().endsWith(extension);
 }
 
-/** The manifest a single make job writes for its platform/arch, or null if the platform has none. */
+/**
+ * The manifest a single make job writes for its platform/arch, or null if the platform has none.
+ * Only macOS is built for two architectures, so only it gets a per-arch file (merged later);
+ * Windows and Linux keep electron-updater's fixed names. A second Windows or Linux arch would
+ * make two jobs write the same file, which `writeManifestsForMakeResults` refuses: give those
+ * platforms per-arch names and a merge step too before adding such a matrix leg.
+ */
 export function manifestFileName(platform: string, arch: string): string | null {
   switch (platform) {
     case 'darwin':
