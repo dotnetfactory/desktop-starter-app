@@ -54,7 +54,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+  // Windows defers deletes of files that were just streamed; retry instead of failing the test.
+  fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   delete process.env.GH_TOKEN;
   delete process.env.GITHUB_TOKEN;
   delete process.env.RELEASES_TOKEN;
@@ -77,6 +78,10 @@ describe('app-update.yml', () => {
 
   it('points electron-updater at a public repo so no credential is needed', () => {
     expect(appConfig.github.private).toBe(false);
+  });
+
+  it('refuses to describe a private repo instead of shipping an updater that cannot work', () => {
+    expect(() => renderAppUpdateYml({ ...appConfig.github, private: true })).toThrow(/public <app>-releases repo/);
   });
 });
 

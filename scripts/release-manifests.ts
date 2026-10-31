@@ -36,10 +36,18 @@ export interface GithubUpdateTarget {
 
 /**
  * Contents of app-update.yml. Fixed shape, four lines, no token. `private` is passed through
- * from app.config.ts so the template stays honest, but a private repo cannot auto-update
- * without a credential in the app, so keep it `false` and publish to a public repo.
+ * from app.config.ts, but a private repo cannot auto-update without a credential in the app and
+ * this build never embeds one, so `private: true` is refused rather than shipped broken: keep
+ * the source private if you like, publish the installers to a public `<app>-releases` repo.
  */
 export function renderAppUpdateYml(target: GithubUpdateTarget): string {
+  if (target.private) {
+    throw new Error(
+      `app.config.ts github.private is true for ${target.owner}/${target.repo}. electron-updater cannot read a private repo ` +
+        'without a token and this build never embeds one (a token in app-update.yml ships in every installer). ' +
+        'Publish releases to a public <app>-releases repo (see storyflow-app / nitrosocial-app) and set private: false.'
+    );
+  }
   return ['provider: github', `owner: ${target.owner}`, `repo: ${target.repo}`, `private: ${target.private}`, ''].join('\n');
 }
 

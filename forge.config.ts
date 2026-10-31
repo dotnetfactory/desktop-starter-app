@@ -88,12 +88,8 @@ const config: ForgeConfig = {
       // read releases anonymously from a PUBLIC repo (`private: false`). A private source repo
       // therefore publishes to a public `<app>-releases` repo, using a RELEASES_TOKEN secret
       // scoped to that repo for publishing only (see storyflow-app and nitrosocial-app). Nothing
-      // here reads GH_TOKEN or writes a `token:` line; scripts/release-manifests.test.ts asserts it.
-      if (appConfig.github.private) {
-        console.warn(
-          'Warning: app.config.ts github.private is true. electron-updater cannot read a private repo without a token, and this build never embeds one; publish to a public <app>-releases repo instead.'
-        );
-      }
+      // here reads GH_TOKEN or writes a `token:` line, and `private: true` fails the build instead
+      // of shipping an updater that can never work; scripts/release-manifests.test.ts asserts both.
       const appUpdateYml = renderAppUpdateYml(appConfig.github);
 
       // buildPath is the app's Contents/Resources/app directory
@@ -153,6 +149,10 @@ const config: ForgeConfig = {
       // job merges the macOS manifests, verifies every manifest against the uploaded assets and
       // only then publishes the draft.
       draft: true,
+      // Re-running the workflow rebuilds every artifact, so replace same-named assets instead of
+      // keeping the stale upload (which would no longer match the fresh manifests). The prepare
+      // job refuses to run against an already-published release, so this only touches drafts.
+      force: true,
     }),
   ],
   plugins: [
