@@ -5,7 +5,7 @@
  * It creates the browser window and initializes the application.
  */
 
-// Load environment variables from .env file (for secrets like GH_TOKEN during development)
+// Load environment variables from .env file (local development overrides; see .env.example)
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -265,13 +265,9 @@ app.whenReady().then(() => {
   if (app.isPackaged && __APP_CONFIG__.autoUpdateEnabled) {
     console.log('[App] Checking for updates...');
 
-    // Configure for private GitHub repo
-    // Token is injected at build time via GH_TOKEN env var, or can be set at runtime
-    const ghToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-    if (ghToken) {
-      autoUpdater.requestHeaders = { Authorization: `token ${ghToken}` };
-    }
-
+    // Updates come from the public GitHub repo named in the packaged app-update.yml (written by
+    // forge.config.ts). electron-updater reads it anonymously, so no request headers are set and
+    // the app never holds a GitHub credential.
     autoUpdater.logger = {
       info: (msg: string) => console.log('[AutoUpdater]', msg),
       warn: (msg: string) => console.warn('[AutoUpdater]', msg),

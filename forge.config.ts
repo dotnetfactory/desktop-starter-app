@@ -9,10 +9,11 @@ import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-nati
 import { PublisherGithub } from '@electron-forge/publisher-github';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
 
 // Import app configuration (committed to repo)
 import { config as appConfig } from './app.config';
+// Update metadata: app-update.yml and the latest-*.yml manifests. Never embeds a credential.
+import { renderAppUpdateYml, writeManifestsForMakeResults } from './scripts/release-manifests';
 
 // Modules that need to be copied to the packaged app (native modules)
 const modulesToCopy = ['better-sqlite3', 'bindings', 'file-uri-to-path', 'electron-squirrel-startup'];
@@ -79,22 +80,21 @@ const config: ForgeConfig = {
         }
       }
 
-      // Generate app-update.yml with embedded token for electron-updater
+      // Generate app-update.yml, which tells electron-updater where releases live.
       // IMPORTANT: This must be done BEFORE code signing (in packageAfterCopy, not postPackage)
       // Adding files after signing invalidates the code signature!
-      const ghToken = process.env.GH_TOKEN;
-
-      let appUpdateYml = `provider: github
-owner: ${appConfig.github.owner}
-repo: ${appConfig.github.repo}
-private: ${appConfig.github.private}
-`;
-      if (ghToken) {
-        appUpdateYml += `token: ${ghToken}\n`;
-        console.log('Embedding GH_TOKEN in app-update.yml for private repo access');
-      } else if (appConfig.github.private) {
-        console.log('Warning: GH_TOKEN not set - auto-updates will not work for private repo');
+      //
+      // The file ships inside every installer, so it never carries a credential: installed apps
+      // read releases anonymously from a PUBLIC repo (`private: false`). A private source repo
+      // therefore publishes to a public `<app>-releases` repo, using a RELEASES_TOKEN secret
+      // scoped to that repo for publishing only (see storyflow-app and nitrosocial-app). Nothing
+      // here reads GH_TOKEN or writes a `token:` line; scripts/release-manifests.test.ts asserts it.
+      if (appConfig.github.private) {
+        console.warn(
+          'Warning: app.config.ts github.private is true. electron-updater cannot read a private repo without a token, and this build never embeds one; publish to a public <app>-releases repo instead.'
+        );
       }
+      const appUpdateYml = renderAppUpdateYml(appConfig.github);
 
       // buildPath is the app's Contents/Resources/app directory
       // We need to write to the parent Resources directory (outside asar)
@@ -104,74 +104,15 @@ private: ${appConfig.github.private}
       fs.writeFileSync(updateYmlDest, appUpdateYml);
     },
     postMake: async (_config, makeResults) => {
-      // Generate latest-*.yml files for electron-updater
-      // These files tell electron-updater what version is available and file checksums
+      // Generate the latest-*.yml manifests electron-updater reads (version, asset name, sha512).
+      // One per platform: latest.yml (Windows), latest-linux.yml, and latest-mac-<arch>.yml, which
+      // the release workflow's finalize job merges into the single latest-mac.yml listing both
+      // architectures. Asset names are the ones GitHub stores (no spaces); see
+      // scripts/release-manifests.ts for the rules and the bugs they fix.
       const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, 'package.json'), 'utf8'));
-      const version = packageJson.version;
-      const releaseDate = new Date().toISOString();
-
-      for (const result of makeResults) {
-        const { platform, arch, artifacts } = result;
-
-        // Find the distributable artifact (DMG for mac, exe/nupkg for Windows, deb/rpm for Linux)
-        for (const artifactPath of artifacts) {
-          const fileName = path.basename(artifactPath);
-          const artifactDir = path.dirname(artifactPath);
-
-          // Calculate SHA512 hash
-          const fileBuffer = fs.readFileSync(artifactPath);
-          const sha512 = crypto.createHash('sha512').update(fileBuffer).digest('base64');
-          const size = fs.statSync(artifactPath).size;
-
-          let ymlFileName: string | null = null;
-          let ymlContent: string | null = null;
-
-          if (platform === 'darwin' && fileName.endsWith('.zip')) {
-            // macOS uses ZIP files for auto-update
-            ymlFileName = `latest-mac.yml`;
-            ymlContent = `version: ${version}
-files:
-  - url: ${fileName}
-    sha512: ${sha512}
-    size: ${size}
-path: ${fileName}
-sha512: ${sha512}
-releaseDate: '${releaseDate}'
-`;
-          } else if (platform === 'win32' && fileName.endsWith('.exe')) {
-            // Windows
-            ymlFileName = `latest.yml`;
-            ymlContent = `version: ${version}
-files:
-  - url: ${fileName}
-    sha512: ${sha512}
-    size: ${size}
-path: ${fileName}
-sha512: ${sha512}
-releaseDate: '${releaseDate}'
-`;
-          } else if (platform === 'linux' && fileName.endsWith('.deb')) {
-            // Linux
-            ymlFileName = `latest-linux.yml`;
-            ymlContent = `version: ${version}
-files:
-  - url: ${fileName}
-    sha512: ${sha512}
-    size: ${size}
-path: ${fileName}
-sha512: ${sha512}
-releaseDate: '${releaseDate}'
-`;
-          }
-
-          if (ymlFileName && ymlContent) {
-            const ymlPath = path.join(artifactDir, ymlFileName);
-            console.log(`Writing ${ymlFileName} for ${platform}-${arch}`);
-            fs.writeFileSync(ymlPath, ymlContent);
-            // Add the yml file to artifacts so it gets uploaded
-            artifacts.push(ymlPath);
-          }
-        }
+      const written = await writeManifestsForMakeResults(makeResults, packageJson.version);
+      for (const manifestPath of written) {
+        console.log(`Wrote ${path.basename(manifestPath)} -> ${manifestPath}`);
       }
     },
   },
@@ -201,12 +142,17 @@ releaseDate: '${releaseDate}'
   ],
   publishers: [
     new PublisherGithub({
+      // Publishes to this repo's own releases with the workflow's GITHUB_TOKEN.
       repository: {
         owner: appConfig.github.owner,
         name: appConfig.github.repo,
       },
+      authToken: process.env.GITHUB_TOKEN,
       prerelease: false,
-      draft: false,
+      // Matrix jobs append to the draft pre-created by the workflow's prepare job; the finalize
+      // job merges the macOS manifests, verifies every manifest against the uploaded assets and
+      // only then publishes the draft.
+      draft: true,
     }),
   ],
   plugins: [

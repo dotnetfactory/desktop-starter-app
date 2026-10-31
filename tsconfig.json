@@ -19,6 +19,6 @@
       "@/*": ["src/*"]
     }
   },
-  "include": ["src"],
+  "include": ["src", "scripts", "app.config.ts", "forge.config.ts"],
   "exclude": ["node_modules", "out", ".vite"]
 }

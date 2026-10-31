@@ -1,12 +1,44 @@
 name: Release
 
+# Tag a version (e.g. v1.0.11) to build every platform and publish the installers to this repo's
+# releases. Installed apps read them anonymously (the repo is public), so no credential is ever
+# embedded in the app (see forge.config.ts).
+#
+# Secrets: only the workflow's own GITHUB_TOKEN for publishing, plus APPLE_* for macOS signing
+# and notarization. Nothing here reads a GH_TOKEN secret.
+
 on:
   push:
     tags:
       - 'v*'
 
+# Creating, uploading to and publishing the release in this repo needs contents: write.
+permissions:
+  contents: write
+
+env:
+  # This public repo publishes to itself.
+  RELEASES_REPO: ${{ github.repository }}
+
 jobs:
+  # Pre-create the draft release in the releases repo so the matrix jobs append to it.
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure draft release exists
+        env:
+          # gh CLI auth only. This GH_TOKEN never reaches npm or forge.config.ts: the packaging
+          # hook does not read it, and scripts/release-manifests.test.ts asserts that no token
+          # is ever written into app-update.yml.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if ! gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$RELEASES_REPO" --draft --title "$TAG" --generate-notes
+          fi
+
   release:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -17,7 +49,11 @@ jobs:
           - os: macos-15-intel
             platform: darwin
             arch: x64
-          - os: windows-latest
+          # Pinned, not windows-latest. windows-latest now resolves to the VS2025
+          # image, and the node-gyp bundled with @electron/rebuild cannot find it
+          # ("Could not find any Visual Studio installation to use"), so the
+          # better-sqlite3 native rebuild fails and no Windows artifact is produced.
+          - os: windows-2022
             platform: win32
             arch: x64
           - os: ubuntu-latest
@@ -25,9 +61,6 @@ jobs:
             arch: x64
 
     runs-on: ${{ matrix.os }}
-
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout code
@@ -57,13 +90,70 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions build.keychain
           rm certificate.p12
 
+      # Uploads this platform's installers and latest-*.yml into the draft release
+      # (forge.config.ts publisher, authToken: GITHUB_TOKEN).
       - name: Publish to GitHub
         run: npm run publish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Token for auto-updater to check private repo releases
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
           # macOS code signing and notarization
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+  # Merge the two macOS manifests, verify every manifest against the uploaded assets, and only
+  # then publish the draft. Any failure leaves the draft unpublished and fails the job.
+  finalize:
+    needs: release
+    runs-on: ubuntu-latest
+    env:
+      # gh CLI auth only (see prepare); npm/forge never run with it here either, only the
+      # manifest scripts, which take no token.
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+        env:
+          # Only scripts/*.ts run here; no Electron binary is needed.
+          ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+      - name: Merge the per-arch macOS manifests into latest-mac.yml
+        run: |
+          mkdir -p manifests
+          gh release download "$TAG" --repo "$RELEASES_REPO" --dir manifests --pattern 'latest-mac-*.yml' || true
+          if [ -f manifests/latest-mac-arm64.yml ] && [ -f manifests/latest-mac-x64.yml ]; then
+            npx tsx scripts/merge-mac-manifest.ts --out manifests/latest-mac.yml manifests/latest-mac-arm64.yml manifests/latest-mac-x64.yml
+            gh release upload "$TAG" manifests/latest-mac.yml --repo "$RELEASES_REPO" --clobber
+            gh release delete-asset "$TAG" latest-mac-arm64.yml --repo "$RELEASES_REPO" --yes
+            gh release delete-asset "$TAG" latest-mac-x64.yml --repo "$RELEASES_REPO" --yes
+          else
+            echo "Per-arch macOS manifests are not on the draft (already merged by an earlier run?)."
+            echo "The gate below still requires latest-mac.yml to list both architectures."
+          fi
+
+      - name: Verify the manifests against the draft's assets
+        run: |
+          rm -rf gate && mkdir -p gate/manifests gate/assets
+          gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/manifests \
+            --pattern 'latest-mac.yml' --pattern 'latest.yml' --pattern 'latest-linux.yml'
+          gh release view "$TAG" --repo "$RELEASES_REPO" --json assets > gate/assets.json
+          # Download every installer the manifests point at so their sha512 can be checked too.
+          npx tsx scripts/verify-release-manifests.ts --tag "$TAG" --manifests gate/manifests --list-referenced |
+            while read -r asset; do
+              gh release download "$TAG" --repo "$RELEASES_REPO" --dir gate/assets --pattern "$asset"
+            done
+          npx tsx scripts/verify-release-manifests.ts --tag "$TAG" --manifests gate/manifests \
+            --assets gate/assets.json --downloads gate/assets
+
+      - name: Publish the draft release
+        run: gh release edit "$TAG" --repo "$RELEASES_REPO" --draft=false
